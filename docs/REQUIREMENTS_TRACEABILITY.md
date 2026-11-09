@@ -117,7 +117,23 @@
 ## Not yet started (honest status)
 
 - R3: Run/Task manager, orchestrator, session management, worktrees, concurrency, handoffs, message bus (FR-050..074)
-- R4: Verification engine, repair loop, approvals workflow, security (FR-080..089, FR-100..110)
+- R4: Verification engine, repair loop, approvals workflow, security (FR-080..089, FR-100..110) — **unit-verified in this phase** (see §7.5); real-session contract verification deferred to R5
 - R5: TUI panel, RPC (FR-004, FR-005), delivery report (FR-108)
 - R6: full test matrix, security audit, perf, final traceability
 - Many FR/NFR/SEC/PERF IDs remain NOT_STARTED — listed as such, never claimed complete.
+
+
+## 7.5 Verification & approval (R4 — verified, unit-level)
+
+| ID | Requirement | Status | Implementation | Tests |
+|---|---|---|---|---|
+| FR-062 | Evidence required before success | VERIFIED | `src/verification/gates.ts` (`verifyExecution`); applied in `Orchestrator.startTask` result branch | `test/unit/gates.test.ts` (AC evidence presence; impl/test evidence) |
+| FR-063 | Failed verification re-queues while attempts remain | VERIFIED | FAILED -> NEEDS_REWORK -> QUEUED in orchestrator result branch | `test/unit/orchestrator.test.ts` (existing retry) |
+| FR-102 | Supervised approval before mutating work | VERIFIED | `needsApproval` gate in `startTask`; `ApprovalRecord` (APR-*, 8h expiry) | `test/unit/approval.test.ts` (pending->parked; approve->completes same attempt; reject->FAILED+SKIPPED; expired->FAILED) |
+| FR-103 | Approval expiry | VERIFIED | `processApprovals` auto-decides expired pending approvals | `test/unit/approval.test.ts` (expired case) |
+| SEC-001 | No secrets in durable state | VERIFIED | `sanitizeForStore` on evidence summaries + gate reasons | `test/unit/redact.test.ts` |
+| NFR-010/011 | Recovery never guesses; WAITING_APPROVAL untouched | VERIFIED | `recovery.ts` reconcile limited to RUNNING/VERIFYING | `test/unit/recovery.test.ts` (existing); R4 note |
+
+## Non-functional requirements covered in R4 (summary)
+
+- Verification is a *presence* gate (evidence exists). Semantic truth of evidence is R5's review/report surface -- stated honestly here.

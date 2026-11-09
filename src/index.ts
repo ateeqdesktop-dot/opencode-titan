@@ -134,16 +134,18 @@ function makeHandlers(): Record<string, Handler> {
 
     // ── R3 handlers ──────────────────────────────────────────────────────────
     plan: async (args, env) => {
-      const goal = args.join(" ").trim()
+      const supervised = args.includes("--supervised") || args.includes("-s")
+      const rest = args.filter((a) => a !== "--supervised" && a !== "-s")
+      const goal = rest.join(" ").trim()
       if (goal.length === 0) {
-        return { ok: false, text: `/titan plan — a goal is required. Example: /titan plan add a CONTRIBUTING section` }
+        return { ok: false, text: `/titan plan — a goal is required. Example: /titan plan --supervised add a CONTRIBUTING section` }
       }
-      const run = await env.engine.rm.createRun({ goal, tasks: runBlueprint(goal) })
+      const run = await env.engine.rm.createRun({ goal, tasks: runBlueprint(goal), mode: supervised ? "supervised" : "direct" })
       const tasks = await env.engine.rm.getTasks(run.id)
       return {
         ok: true,
         text: [
-          `Planned run ${run.id} (${tasks.length} tasks, workers ≤ ${run.budget.maxConcurrentWorkers}).`,
+          `Planned run ${run.id} (${tasks.length} tasks, mode=${run.mode}, workers ≤ ${run.budget.maxConcurrentWorkers}).`,
           ...tasks.map((t, i) => `  ${i + 1}. ${t.title} (${t.type})`),
           `Start it with: /titan run ${run.id}`,
         ].join("\n"),
@@ -246,8 +248,27 @@ function makeHandlers(): Record<string, Handler> {
     // Honest stubs until their phases land — never fake success (brief: no unverified claims).
     review: notImplemented("review", "R4 verification engine"),
     verify: notImplemented("verify", "R4 verification gates"),
-    approve: notImplemented("approve", "R4 approval workflow"),
-    reject: notImplemented("reject", "R4 approval workflow"),
+    approve: async (args, env) => {
+      const { rm, orch } = env.engine
+      const runId = args[0]?.trim() || latestRun(await rm.listRunsByStatus(["RUNNING", "PAUSED"]))
+      if (!runId) return { ok: false, text: `/titan approve — no run id given and no active run found.` }
+      const run = await rm.getRun(runId)
+      if (!run) return { ok: false, text: `/titan approve — run not found: ${runId}` }
+      const n = await orch.decideApproval(runId, "approved", "human", undefined)
+      if (n === 0) return { ok: true, text: `No pending approvals found for ${runId}.` }
+      return { ok: true, text: `Approved ${n} pending task(s) in ${runId}; execution resumes on the next scheduler tick.` }
+    },
+
+    reject: async (args, env) => {
+      const { rm, orch } = env.engine
+      const runId = args[0]?.trim() || latestRun(await rm.listRunsByStatus(["RUNNING", "PAUSED"]))
+      if (!runId) return { ok: false, text: `/titan reject — no run id given and no active run found.` }
+      const run = await rm.getRun(runId)
+      if (!run) return { ok: false, text: `/titan reject — run not found: ${runId}` }
+      const n = await orch.decideApproval(runId, "rejected", "human", undefined)
+      if (n === 0) return { ok: true, text: `No pending approvals found for ${runId}.` }
+      return { ok: true, text: `Rejected ${n} pending task(s) in ${runId}; dependents marked SKIPPED.` }
+    },
     report: notImplemented("report", "R5 delivery report"),
   }
 }

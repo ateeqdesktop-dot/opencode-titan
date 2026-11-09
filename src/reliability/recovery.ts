@@ -81,7 +81,10 @@ export async function recover(
       let touched = false
       for (const task of tasks) {
         // A task marked RUNNING but with no (or expired) lease is ambiguous.
-        if (task.status === "RUNNING" || task.status === "VERIFYING" || task.status === "WAITING_APPROVAL") {
+        // WAITING_APPROVAL is deliberate parking (human gate) — even without a
+        // live lease it must NOT be reconciled to BLOCKED; the approval state
+        // machine owns its next move (R4, FR-102).
+        if (task.status === "RUNNING" || task.status === "VERIFYING") {
           const lease = await adapter.getLease(task.id)
           const leaseAlive = !!lease && lease.expiresAt > now
           if (!leaseAlive) {

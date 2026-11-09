@@ -23,6 +23,9 @@ import { Dag } from "./dag.js"
 import { transitionRun, transitionTask } from "../domain/state.js"
 import { type Run, type Task, type TaskState, type RunFullState, type ErrorClass } from "../domain/types.js"
 import { isRetryable } from "../domain/types.js"
+import { verifyExecution, needsApproval } from "../verification/gates.js"
+import { sanitizeForStore } from "../security/redact.js"
+import { randomUUID } from "node:crypto"
 
 // ── Executor abstraction (real impl binds OpenCode sessions) ──────────────────
 export interface TaskExecutionContext {
@@ -135,6 +138,9 @@ export class Orchestrator {
       }
 
       const tasks = await rm.getTasks(runId)
+      // Drive the approval state machine FIRST: expired/rejected approvals fail
+      // their parked tasks; approved ones are returned for resumption.
+      const { resumable } = await this.processApprovals(runId, tasks)
       const running = tasks.filter((t) => t.status === "RUNNING" || t.status === "VERIFYING" || t.status === "WAITING_APPROVAL")
       const slots = maxWorkers - running.length
       if (slots <= 0) {
@@ -146,7 +152,14 @@ export class Orchestrator {
       const ready = await rm.readyTasks(runId)
       // Exclude tasks already running/queued-attempted.
       const candidates = ready.filter((t) => t.status === "READY" || t.status === "QUEUED" || t.status === "DRAFT")
-      if (candidates.length === 0) {
+
+      // Resumptions (approved approvals) take priority over new launches; both
+      // consume slots so concurrency limits hold while work is waiting.
+      const launches = [...resumable.slice(0, slots)]
+      const freshSlots = slots - launches.length
+      if (freshSlots > 0) launches.push(...candidates.slice(0, freshSlots))
+
+      if (launches.length === 0) {
         if (running.length > 0) {
           await this.sleep(50)
           continue
@@ -155,8 +168,7 @@ export class Orchestrator {
       }
 
       // Launch up to `slots` tasks concurrently.
-      const batch = candidates.slice(0, slots)
-      await Promise.all(batch.map((t) => this.startTask(runId, t.id, budget, maxWorkers)))
+      await Promise.all(launches.map((t) => this.startTask(runId, t.id, budget, maxWorkers)))
     }
 
     // All tasks done — determine run outcome.
@@ -229,16 +241,23 @@ export class Orchestrator {
       workspaceDir = await this.deps.worktreeForTask(task).catch(() => undefined)
     }
 
-    // Transition to RUNNING.
+    // Transition to RUNNING — fresh start vs approval-resume path.
     const cur = await rm.getTask(taskId)
-    if (cur && (cur.status === "DRAFT" || cur.status === "BLOCKED")) {
-      await rm.transitionTask(taskId, "READY").catch(() => {})
+    const resuming = cur?.status === "WAITING_APPROVAL"
+    if (resuming) {
+      await rm.transitionTask(taskId, "RUNNING", "approval granted, resuming execution").catch(() => {})
+    } else {
+      if (cur && (cur.status === "DRAFT" || cur.status === "BLOCKED")) {
+        await rm.transitionTask(taskId, "READY").catch(() => {})
+      }
+      await rm.transitionTask(taskId, "QUEUED").catch(() => {})
+      await rm.transitionTask(taskId, "RUNNING").catch(() => {})
     }
-    await rm.transitionTask(taskId, "QUEUED").catch(() => {})
-    await rm.transitionTask(taskId, "RUNNING").catch(() => {})
     const t = await rm.getTask(taskId)
     if (t) {
-      t.attempts = (t.attempts ?? 0) + 1
+      // Attempts count EXECUTIONS: fresh start increments once; an approval
+      // resume continues the single execution that was gated, not a new attempt.
+      if (!resuming) t.attempts = (t.attempts ?? 0) + 1
       if (workspaceDir) t.workspaceId = workspaceDir
       await rm.updateTask(t)
     }
@@ -250,6 +269,53 @@ export class Orchestrator {
       this.abortControllers.delete(taskId)
       this.taskRunIndex.delete(taskId)
       return
+    }
+
+    // Supervised approval gate (SRS FR-102, RUN mode "supervised"): mutating
+    // task types need a human decision before the worker model session runs.
+    // The task parks in WAITING_APPROVAL; the scheduling loop keeps the slot so
+    // concurrency limits still hold while waiting, and executes the moment the
+    // approval is granted (or fails it on expiry/rejection).
+    if (!resuming && run.mode === "supervised" && needsApproval(task) && (freshT?.attempts ?? 0) <= 1) {
+      const approvals = await this.deps.persistence.listApprovalsByRun(runId)
+      const mine = approvals.filter((a) => a.taskId === taskId)
+      const hasApproved = mine.some((a) => a.status === "approved" && (!a.expiresAt || a.expiresAt > this.now()))
+      const hasPending = mine.some((a) => a.status === "pending")
+      if (hasApproved) {
+        // resume execution below (task already RUNNING)
+      } else if (hasPending) {
+        await rm.transitionTask(taskId, "WAITING_APPROVAL", "awaiting human approval").catch(() => {})
+        await rm.releaseTaskLease(taskId, owner).catch(() => {})
+        this.abortControllers.delete(taskId)
+        this.taskRunIndex.delete(taskId)
+        return
+      } else {
+        const apr = {
+          id: `APR-${randomUUID().slice(0, 8)}`,
+          runId,
+          taskId,
+          action: "task.execute",
+          resource: taskId,
+          requestedBy: "titan.orchestrator",
+          reason: `supervised run: ${task.type} task "${task.title}"`,
+          status: "pending",
+          expiresAt: this.now() + 8 * 60 * 60 * 1000,
+        }
+        await this.deps.persistence.putApproval(apr)
+        await rm.transitionTask(taskId, "WAITING_APPROVAL", `approval requested: ${apr.id}`).catch(() => {})
+        await this.deps.persistence.appendEvent({
+          type: "approval.requested",
+          runId,
+          taskId,
+          schemaVersion: 1,
+          payload: JSON.stringify({ approvalId: apr.id, action: apr.action }),
+          at: this.now(),
+        })
+        await rm.releaseTaskLease(taskId, owner).catch(() => {})
+        this.abortControllers.delete(taskId)
+        this.taskRunIndex.delete(taskId)
+        return
+      }
     }
 
     // Pre-launch budget gate: a run that has exhausted its budget must not spend
@@ -312,16 +378,42 @@ export class Orchestrator {
     // Release lease.
     await rm.releaseTaskLease(taskId, owner).catch(() => {})
 
-    // Persist result + transition.
+    // Persist result + transition. Evidence is sanitized before it reaches
+    // durable state — anything resembling a credential is masked (SRS §11).
     const updated = await rm.getTask(taskId)
     if (updated) {
-      updated.evidence = [...updated.evidence, ...result.evidence.map((e) => ({ ...e, at: this.now() }))]
+      updated.evidence = [
+        ...updated.evidence,
+        ...result.evidence.map((e) => ({ ...e, summary: sanitizeForStore(e.summary).text, at: this.now() })),
+      ]
       await rm.updateTask(updated)
     }
 
     if (result.ok) {
-      await rm.transitionTask(taskId, "VERIFYING").catch(() => {})
-      await rm.transitionTask(taskId, "SUCCEEDED").catch(() => {})
+      // Verification gate (SRS §9, FR-062..FR-064): acceptance criteria that
+      // demand evidence get checked BEFORE the task may reach SUCCEEDED.
+      const verdict = verifyExecution((await rm.getTask(taskId))!, result)
+      await this.deps.persistence.appendEvent({
+        type: "verify.result",
+        runId,
+        taskId,
+        schemaVersion: 1,
+        payload: JSON.stringify({ ok: verdict.ok, issues: verdict.issues }),
+        at: this.now(),
+      })
+      if (verdict.ok) {
+        await rm.transitionTask(taskId, "VERIFYING").catch(() => {})
+        await rm.transitionTask(taskId, "SUCCEEDED").catch(() => {})
+      } else {
+        const reason = sanitizeForStore(`verification gate rejected: ${verdict.issues.join("; ")}`).text
+        await rm.transitionTask(taskId, "FAILED", reason).catch(() => {})
+        // Gate failures are reworkable while attempts remain.
+        const post = await rm.getTask(taskId)
+        if (!this.cancelled.has(runId) && post && post.attempts < post.limits.maxAttempts) {
+          await rm.transitionTask(taskId, "NEEDS_REWORK", "verification failed, re-queue").catch(() => {})
+          await rm.transitionTask(taskId, "QUEUED").catch(() => {})
+        }
+      }
     } else {
       // Failure propagation policy: dependents of a failed task are SKIPPED so
       // the DAG can never start them on stale upstream results (FR-026/027).
@@ -351,6 +443,94 @@ export class Orchestrator {
       payload: JSON.stringify({ ok: result.ok, errorClass: result.errorClass }),
       at: this.now(),
     })
+  }
+
+  /**
+   * Drive the approval state machine for tasks parked in WAITING_APPROVAL.
+   *
+   *  - an `approved` approval → task returned in `resumable` (the main loop
+   *    re-enters `startTask`, which transitions WAITING_APPROVAL → RUNNING and
+   *    continues the SAME execution attempt — no attempts increment);
+   *  - a `rejected` approval → task FAILED, dependents SKIPPED (a human said
+   *    no — re-queueing would circumvent the decision, FR-102);
+   *  - a `pending` approval past `expiresAt` → auto-decided `expired` (propagates
+   *    like a rejection), so nothing waits forever.
+   */
+  private async processApprovals(
+    runId: string,
+    tasks: readonly { id: string; status: TaskState }[],
+  ): Promise<{ resumable: { id: string }[] }> {
+    const waiting = tasks.filter((t) => t.status === "WAITING_APPROVAL")
+    if (waiting.length === 0) return { resumable: [] }
+
+    const rm = this.deps.runManager
+    const approvals = await this.deps.persistence.listApprovalsByRun(runId)
+    const resumable: { id: string }[] = []
+
+    for (const t of waiting) {
+      const mine = approvals.filter((a) => a.taskId === t.id)
+      if (mine.some((a) => a.status === "approved")) {
+        resumable.push(t)
+        continue
+      }
+      const rejected = mine.find((a) => a.status === "rejected")
+      const expired = mine.find((a) => a.status === "pending" && a.expiresAt !== undefined && a.expiresAt < this.now())
+      if (!rejected && !expired) continue
+
+      const decision = rejected ? "rejected" : "expired"
+      const reason = `approval ${decision}${rejected?.decidedBy ? ` by ${rejected.decidedBy}` : ""}`
+      await rm.transitionTask(t.id, "FAILED", reason).catch(() => {})
+      await this.deps.persistence.appendEvent({
+        type: "approval.decided",
+        runId,
+        taskId: t.id,
+        schemaVersion: 1,
+        payload: JSON.stringify({ decision, source: "orchestrator" }),
+        at: this.now(),
+      })
+      // Dependents of a task that will never run are SKIPPED (ADR-006).
+      const dag = await rm.dagForRun(runId)
+      dag.setState(t.id, "failed")
+      const skipped = dag.propagateFailure(t.id)
+      for (const sid of skipped) {
+        await rm.transitionTask(sid, "SKIPPED", `upstream ${t.id} approval ${decision}`).catch(() => {})
+      }
+    }
+    return { resumable }
+  }
+
+  /**
+   * Record a human decision (`approved`/`rejected`) on pending approvals of a
+   * run. Returns how many approvals were updated. Expired approvals are untouchable.
+   */
+  async decideApproval(
+    runId: string,
+    status: "approved" | "rejected",
+    decidedBy: string,
+    taskId?: string,
+  ): Promise<number> {
+    const now = this.now()
+    const pendings = await this.deps.persistence.listPendingApprovals()
+    const mine = pendings.filter(
+      (a) => a.runId === runId && (!taskId || a.taskId === taskId) && (!a.expiresAt || a.expiresAt > now),
+    )
+    for (const a of mine) {
+      await this.deps.persistence.putApproval({ ...a, status, decidedBy, decidedAt: now })
+    }
+    if (mine.length > 0) {
+      await this.deps.persistence.appendEvent({
+        type: "approval.decided",
+        runId,
+        schemaVersion: 1,
+        payload: JSON.stringify({
+          decision: status,
+          decidedBy,
+          approvals: mine.map((a) => a.id),
+        }),
+        at: now,
+      })
+    }
+    return mine.length
   }
 
   pause(runId: string): void {
