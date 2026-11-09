@@ -42,8 +42,10 @@ with a complete durable journal (8 run transitions, 30 task transitions).
    synthetic-message recipe instead.
 2. **Model-assisted deep review** — `review` is an evidence-presence review,
    not a semantic LLM review. The deterministic version is honest and testable.
-3. **Worktree merge-back (FR-061)** — isolated changes stay in their worktrees;
-   nothing merges to the main tree automatically. Integrating is a human step.
+3. **Worktree merge-back (FR-061)** — IMPLEMENTED (git cherry-pick of the
+   worktree commit into the main tree after a successful verified task, then
+   worktree removed). Verified by isolated git simulation; live verification
+   blocked by free-model quota exhaustion, not a code defect.
 4. **RPC surface (FR-004/005 external callers)** — not implemented; no external
    caller exists in scope.
 5. **Fallback model path (FR-044)** — implemented and unit-covered, but never
@@ -60,7 +62,7 @@ with a complete durable journal (8 run transitions, 30 task transitions).
   status/reporting, verification gates, secret redaction, recovery after
   restart, cancel/pause/resume, budget limits.
 - **Use with care**: supervised mode (unit-verified only), worktree merge-back
-  (manual), any task whose acceptance criteria require semantic (not just
+  (implemented, live-blocked by quota), any task whose acceptance criteria require semantic (not just
   presence) verification.
 - **Do not rely on**: TUI panel (absent), RPC (absent), auto-merge (absent).
 

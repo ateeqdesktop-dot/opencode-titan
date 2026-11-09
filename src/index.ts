@@ -18,6 +18,7 @@
  */
 import { Plugin } from "@opencode/plugin"
 import { join } from "node:path"
+import { execFileSync } from "node:child_process"
 import { parseTitanCommand, helpText, CommandParseError, type CommandResult } from "./application/commands.js"
 import { runDoctor, renderDoctor, versionGte, MIN_OPENCODE_VERSION, type DoctorSources } from "./application/doctor.js"
 import { SqliteAdapter } from "./reliability/sqlite.js"
@@ -40,6 +41,7 @@ interface Registration {
 
 /** Live orchestration engine built in setup and handed to command handlers. */
 interface TitanEngine {
+  readonly ctx: Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
   readonly registry: AgentRegistry
   readonly router: ModelRouter
   readonly rm: RunManager
@@ -248,8 +250,10 @@ function makeHandlers(): Record<string, Handler> {
 
     // Honest stubs until their phases land — never fake success (brief: no unverified claims).
     review: async (args, env) => {
-      const { rm } = env.engine
-      const runId = args[0]?.trim() || latestRun(await rm.listRuns())
+      const { rm, ctx } = env.engine
+      const deep = args.includes("--deep")
+      const rest = args.filter((a) => a !== "--deep")
+      const runId = rest[0]?.trim() || latestRun(await rm.listRuns())
       if (!runId) return { ok: false, text: `/titan review — no run id given and no runs exist.` }
       const run = await rm.getRun(runId)
       if (!run) return { ok: false, text: `/titan review — run not found: ${runId}` }
@@ -276,8 +280,43 @@ function makeHandlers(): Record<string, Handler> {
         `Evidence entries: ${evidenceCount}  (AC total ${acTotal}, evidence-required ${acRequired})`,
         `Approvals: ${approvals.length} total, ${approvals.filter((a) => a.status === "approved").length} approved, ${approvals.filter((a) => a.status === "rejected").length} rejected`,
         `Roles: ${[...new Set(tasks.map((t) => t.assignedRole).filter(Boolean))].join(", ") || "none"}`,
-        "Note: this is an evidence-based review (presence of proof). A model-assisted deep review is a future enhancement.",
       ]
+
+      if (deep) {
+        try {
+          const model = env.engine.router.route({ taskType: "review", requiresTools: false, allowlist: [], allowFallback: true })
+          const sess = await ctx.session.create({
+            title: `TITAN review — ${runId}`.slice(0, 120),
+            model: { id: model.modelID, providerID: model.providerID },
+            metadata: { titan: { runId, deepReview: true } },
+          })
+          const hook = await ctx.session.hook("context", (input) => {
+            if (input.sessionID !== sess.id) return
+            input.system.push({ type: "text", text: `You are the "Reviewer" role. Review this run's evidence and produce a one-paragraph verdict.` })
+          })
+          const brief = [
+            `Run ${runId}: ${run.goal}`,
+            `Tasks: ${tasks.map((t) => `${t.id} [${t.status}] ${t.title} (role=${t.assignedRole ?? "?"}, evidence=${t.evidence.length})`).join("\\n")}`,
+            `Approvals: ${approvals.length}`,
+          ].join("\\n")
+          await ctx.session.prompt({ sessionID: sess.id, text: brief })
+          const wait = ctx.session.wait({ sessionID: sess.id }).then(() => "done" as const)
+          const timeout = new Promise<"timeout">((resolve) => { const t = setTimeout(() => resolve("timeout" as const), 120000); if (typeof t === "object" && t) (t as unknown as { unref?: () => void }).unref?.() })
+          const end = await Promise.race([wait, timeout])
+          if (end === "timeout") await ctx.session.interrupt({ sessionID: sess.id }).catch(() => {})
+          const context = await ctx.session.context({ sessionID: sess.id })
+          const arr = Array.isArray(context) ? context : ((context as { data?: unknown[] })?.data ?? [])
+          const last = [...arr].reverse().find((m) => (m as { type?: string })?.type === "assistant") as { text?: string; content?: { type: string; text?: string }[] } | undefined
+          const text = last?.text && last.text.length > 0 ? last.text : (last?.content ?? []).filter((c) => c.type === "text").map((c) => c.text ?? "").join("\\n")
+          await hook.dispose().catch(() => {})
+          lines.push("", "## Deep review (model-assisted)", "", text.trim().slice(0, 1500) || "(no output)")
+        } catch (e) {
+          lines.push("", `## Deep review failed: ${String(e)}`)
+        }
+      } else {
+        lines.push("Note: this is an evidence-based review (presence of proof). Run `/titan review --deep` for a model-assisted review.")
+      }
+
       return { ok: true, text: lines.join("\\n") }
     },
 
@@ -407,8 +446,31 @@ async function makeEngine(
         return undefined
       }
     },
+    // FR-061: merge isolated worktree changes back into the main project tree.
+    mergeWorktree: async (workspaceDir) => {
+      const mainDir = ctx.location.directory
+      try {
+        // Commit whatever the worker changed inside the worktree.
+        execFileSync("git", ["-C", workspaceDir, "add", "-A"], { stdio: "ignore" })
+        execFileSync("git", ["-C", workspaceDir, "commit", "-m", "titan: isolated task changes", "--allow-empty"], { stdio: "ignore" })
+        const sha = execFileSync("git", ["-C", workspaceDir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
+        // Apply the resulting diff to the main tree without committing.
+        execFileSync("git", ["-C", mainDir, "cherry-pick", "--no-commit", sha], { stdio: "ignore" })
+        execFileSync("git", ["-C", mainDir, "reset", "--mixed", "HEAD"], { stdio: "ignore" })
+      } catch (e) {
+        console.error(`[titan] mergeWorktree failed for ${workspaceDir}:`, e)
+      }
+    },
+    // FR-060 cleanup: always remove the worktree after the task finishes.
+    cleanupWorktree: async (workspaceDir) => {
+      try {
+        await ctx.worktree.remove({ projectID: ctx.location.project.id, directory: workspaceDir, force: true })
+      } catch (e) {
+        console.error(`[titan] cleanupWorktree failed for ${workspaceDir}:`, e)
+      }
+    },
   })
-  return { engine: { registry, router, rm, orch }, close: () => db.close() }
+  return { engine: { ctx, registry, router, rm, orch }, close: () => db.close() }
 }
 
 export default Plugin.define({

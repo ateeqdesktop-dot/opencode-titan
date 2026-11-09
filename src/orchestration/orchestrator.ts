@@ -55,6 +55,8 @@ export interface OrchestratorDeps {
   readonly router: ModelRouter
   readonly executor: TaskExecutor
   readonly worktreeForTask?: (task: Task) => Promise<string | undefined>
+  readonly mergeWorktree?: (workspaceDir: string) => Promise<void>
+  readonly cleanupWorktree?: (workspaceDir: string) => Promise<void>
   readonly now?: () => number
 }
 
@@ -404,6 +406,12 @@ export class Orchestrator {
       if (verdict.ok) {
         await rm.transitionTask(taskId, "VERIFYING").catch(() => {})
         await rm.transitionTask(taskId, "SUCCEEDED").catch(() => {})
+        // FR-061: merge isolated worktree changes back into the main tree.
+        if (workspaceDir && this.deps.mergeWorktree) {
+          await this.deps.mergeWorktree(workspaceDir).catch((e) =>
+            console.error(`[titan] mergeWorktree failed for ${taskId}:`, e),
+          )
+        }
       } else {
         const reason = sanitizeForStore(`verification gate rejected: ${verdict.issues.join("; ")}`).text
         await rm.transitionTask(taskId, "FAILED", reason).catch(() => {})
@@ -443,6 +451,14 @@ export class Orchestrator {
       payload: JSON.stringify({ ok: result.ok, errorClass: result.errorClass }),
       at: this.now(),
     })
+
+    // Worktree cleanup (FR-060): always remove the isolated worktree after the
+    // task finishes, whether it succeeded, failed, or was cancelled.
+    if (workspaceDir && this.deps.cleanupWorktree) {
+      await this.deps.cleanupWorktree(workspaceDir).catch((e) =>
+        console.error(`[titan] cleanupWorktree failed for ${taskId}:`, e),
+      )
+    }
   }
 
   /**

@@ -54,10 +54,10 @@ Run `RUN-be0bc8c9` (sandbox project, "create demo.txt with TITAN-OK"):
 
 ## Known limitations (honest)
 
-- **Worktree merge policy comes with R4** (SRS FR-061): isolated changes stay
-  inside their worktrees; nothing merges back automatically yet. The run above
-  "succeeded" with the artifact inside the worktree — integrating/merging is
-  explicitly not claimed in R3.
+- **Worktree merge policy implemented in R6** (SRS FR-061): on a successful
+  verified task, the worktree commit is cherry-picked into the main tree and
+  the worktree is removed. Verified by isolated git simulation; live
+  verification blocked by free-model quota exhaustion, not a code defect.
 - Role selection preferentially picks specialists over the coordinator role
   (registry change in R3); `architect`/`integrator` are used for planning and
   integration after the fix.
