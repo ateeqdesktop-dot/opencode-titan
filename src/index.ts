@@ -29,6 +29,7 @@ import { Orchestrator } from "./orchestration/orchestrator.js"
 import { createSessionExecutor } from "./execution/session-executor.js"
 import { runBlueprint, renderRunStatus } from "./application/playbook.js"
 import { verifyExecution } from "./verification/gates.js"
+import { validateRequest, makeRunSummary, RPC_SCHEMA_VERSION, type RpcRequest, type RpcResponse } from "./rpc/contract.js"
 
 export const TITAN_PLUGIN_ID = "titan.orchestrator"
 
@@ -46,6 +47,7 @@ interface TitanEngine {
   readonly router: ModelRouter
   readonly rm: RunManager
   readonly orch: Orchestrator
+  readonly rpc: (req: unknown) => Promise<import("./rpc/contract.js").RpcResponse>
 }
 
 /** Everything a subcommand handler may use. */
@@ -362,6 +364,14 @@ function makeHandlers(): Record<string, Handler> {
       if (n === 0) return { ok: true, text: `No pending approvals found for ${runId}.` }
       return { ok: true, text: `Rejected ${n} pending task(s) in ${runId}; dependents marked SKIPPED.` }
     },
+    rpc: async (args, env) => {
+      const raw = args.join(" ").trim()
+      if (raw.length === 0) return { ok: false, text: `/titan rpc — JSON request required. Example: /titan rpc {"kind":"run.list"}` }
+      let parsed: unknown
+      try { parsed = JSON.parse(raw) } catch (e) { return { ok: false, text: `/titan rpc — invalid JSON: ${String(e)}` } }
+      const res = await env.engine.rpc(parsed)
+      return { ok: res.ok, text: JSON.stringify(res, null, 2) }
+    },
     report: async (args, env) => {
       const { rm, orch } = env.engine
       const runId = args[0]?.trim() || latestRun(await rm.listRuns())
@@ -470,7 +480,50 @@ async function makeEngine(
       }
     },
   })
-  return { engine: { ctx, registry, router, rm, orch }, close: () => db.close() }
+  const rpc = async (req: unknown): Promise<RpcResponse> => {
+    const v = validateRequest(req)
+    if (!v.ok) return { ok: false, error: v.error, code: "invalid" }
+    const r = v.req
+    try {
+      switch (r.kind) {
+        case "run.list": {
+          const runs = await rm.listRuns()
+          const out = await Promise.all(
+            runs.map(async (run) => {
+              const tasks = await rm.getTasks(run.id)
+              return makeRunSummary({ id: run.id, goal: run.goal, status: run.status, mode: run.mode, tasks, activeWorkers: await orch.activeWorkers(run.id), closedAt: run.closedAt })
+            }),
+          )
+          return { ok: true, data: out }
+        }
+        case "run.status": {
+          const run = await rm.getRun(r.runId)
+          if (!run) return { ok: false, error: `run not found: ${r.runId}`, code: "not-found" }
+          const tasks = await rm.getTasks(run.id)
+          return { ok: true, data: makeRunSummary({ id: run.id, goal: run.goal, status: run.status, mode: run.mode, tasks, activeWorkers: await orch.activeWorkers(run.id), closedAt: run.closedAt }) }
+        }
+        case "task.list": {
+          const run = await rm.getRun(r.runId)
+          if (!run) return { ok: false, error: `run not found: ${r.runId}`, code: "not-found" }
+          const tasks = await rm.getTasks(run.id)
+          return { ok: true, data: tasks.map((t) => ({ schemaVersion: RPC_SCHEMA_VERSION, id: t.id, runId: t.runId, title: t.title, type: t.type, status: t.status, assignedRole: t.assignedRole, evidenceCount: t.evidence.length })) }
+        }
+        case "approval.list": {
+          const run = await rm.getRun(r.runId)
+          if (!run) return { ok: false, error: `run not found: ${r.runId}`, code: "not-found" }
+          const approvals = await rm.listApprovals(run.id)
+          return { ok: true, data: approvals.map((a) => ({ schemaVersion: RPC_SCHEMA_VERSION, id: a.id, runId: a.runId, taskId: a.taskId, status: a.status, reason: a.reason, expiresAt: a.expiresAt })) }
+        }
+        case "approval.decide": {
+          const n = await orch.decideApproval(r.runId, r.status, r.decidedBy)
+          return { ok: true, data: { decided: n } }
+        }
+      }
+    } catch (e) {
+      return { ok: false, error: String(e), code: "internal" }
+    }
+  }
+  return { engine: { ctx, registry, router, rm, orch, rpc }, close: () => db.close() }
 }
 
 export default Plugin.define({

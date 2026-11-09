@@ -26,6 +26,7 @@ export const TITAN_SUBCOMMANDS = [
   "approve",
   "reject",
   "report",
+  "rpc",
 ] as const
 export type TitanSubcommand = (typeof TITAN_SUBCOMMANDS)[number]
 

@@ -36,10 +36,10 @@ with a complete durable journal (8 run transitions, 30 task transitions).
 
 ## What is NOT verified / NOT implemented (honest)
 
-1. **TUI panel (FR-004, FR-005)** — not implemented. No headless verification
-   path exists in this environment; shipping untested UI code would violate the
-   "no unverified claims" rule. Status display is delivered via the verified
-   synthetic-message recipe instead.
+1. **TUI panel (FR-004, FR-005)** — SKELETON IMPLEMENTED (`src/tui.ts`, compiles,
+   registers a `/titan` slash command + toast). Runtime verification requires a
+   human running `opencode` TUI — no headless harness exists. Status detail is
+   fetched via the typed RPC contract (src/rpc/contract.ts).
 2. **Model-assisted deep review** — `review` is an evidence-presence review,
    not a semantic LLM review. The deterministic version is honest and testable.
 3. **Worktree merge-back (FR-061)** — IMPLEMENTED (git cherry-pick of the
