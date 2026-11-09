@@ -27,6 +27,7 @@ import { RunManager } from "./application/run-manager.js"
 import { Orchestrator } from "./orchestration/orchestrator.js"
 import { createSessionExecutor } from "./execution/session-executor.js"
 import { runBlueprint, renderRunStatus } from "./application/playbook.js"
+import { verifyExecution } from "./verification/gates.js"
 
 export const TITAN_PLUGIN_ID = "titan.orchestrator"
 
@@ -246,8 +247,61 @@ function makeHandlers(): Record<string, Handler> {
     },
 
     // Honest stubs until their phases land — never fake success (brief: no unverified claims).
-    review: notImplemented("review", "R4 verification engine"),
-    verify: notImplemented("verify", "R4 verification gates"),
+    review: async (args, env) => {
+      const { rm } = env.engine
+      const runId = args[0]?.trim() || latestRun(await rm.listRuns())
+      if (!runId) return { ok: false, text: `/titan review — no run id given and no runs exist.` }
+      const run = await rm.getRun(runId)
+      if (!run) return { ok: false, text: `/titan review — run not found: ${runId}` }
+      const tasks = await rm.getTasks(runId)
+      const approvals = await rm.listApprovals(runId)
+      const total = tasks.length
+      const succeeded = tasks.filter((t) => t.status === "SUCCEEDED").length
+      const failed = tasks.filter((t) => t.status === "FAILED").length
+      const evidenceCount = tasks.reduce((a, t) => a + t.evidence.length, 0)
+      const acTotal = tasks.reduce((a, t) => a + t.acceptanceCriteria.length, 0)
+      const acRequired = tasks.reduce((a, t) => a + t.acceptanceCriteria.filter((c) => c.evidenceRequired).length, 0)
+      const verdict =
+        run.status === "CLOSED" && failed === 0 && succeeded === total
+          ? "PASS — all tasks succeeded with evidence"
+          : failed > 0
+            ? `FAIL — ${failed} task(s) failed`
+            : `INCOMPLETE — ${succeeded}/${total} tasks succeeded`
+      const lines = [
+        `TITAN review — ${runId}`,
+        `Goal: ${run.goal}`,
+        `Run status: ${run.status}  Mode: ${run.mode}`,
+        `Verdict: ${verdict}`,
+        `Tasks: ${succeeded}/${total} succeeded, ${failed} failed, ${tasks.filter((t) => t.status === "SKIPPED").length} skipped`,
+        `Evidence entries: ${evidenceCount}  (AC total ${acTotal}, evidence-required ${acRequired})`,
+        `Approvals: ${approvals.length} total, ${approvals.filter((a) => a.status === "approved").length} approved, ${approvals.filter((a) => a.status === "rejected").length} rejected`,
+        `Roles: ${[...new Set(tasks.map((t) => t.assignedRole).filter(Boolean))].join(", ") || "none"}`,
+        "Note: this is an evidence-based review (presence of proof). A model-assisted deep review is a future enhancement.",
+      ]
+      return { ok: true, text: lines.join("\\n") }
+    },
+
+    verify: async (args, env) => {
+      const { rm } = env.engine
+      const runId = args[0]?.trim() || latestRun(await rm.listRuns())
+      if (!runId) return { ok: false, text: `/titan verify — no run id given and no runs exist.` }
+      const run = await rm.getRun(runId)
+      if (!run) return { ok: false, text: `/titan verify — run not found: ${runId}` }
+      const tasks = await rm.getTasks(runId)
+      const lines = [`TITAN verify — ${runId}`]
+      let pass = 0
+      let fail = 0
+      for (const t of tasks) {
+        const v = verifyExecution(t, { ok: t.status === "SUCCEEDED", evidence: t.evidence.map((e) => ({ kind: e.kind as "diff" | "test" | "log" | "artifact" | "command", ref: e.ref, summary: e.summary, ok: e.ok })) })
+        if (v.ok) pass++
+        else fail++
+        const tag = v.ok ? "PASS" : "FAIL"
+        const detail = v.ok ? "" : ` — ${v.issues.join("; ")}`
+        lines.push(`  [${tag}] ${t.id} ${t.title}${detail}`)
+      }
+      lines.push(`Summary: ${pass} PASS, ${fail} FAIL out of ${tasks.length}`)
+      return { ok: true, text: lines.join("\\n") }
+    },
     approve: async (args, env) => {
       const { rm, orch } = env.engine
       const runId = args[0]?.trim() || latestRun(await rm.listRunsByStatus(["RUNNING", "PAUSED"]))
@@ -269,7 +323,53 @@ function makeHandlers(): Record<string, Handler> {
       if (n === 0) return { ok: true, text: `No pending approvals found for ${runId}.` }
       return { ok: true, text: `Rejected ${n} pending task(s) in ${runId}; dependents marked SKIPPED.` }
     },
-    report: notImplemented("report", "R5 delivery report"),
+    report: async (args, env) => {
+      const { rm, orch } = env.engine
+      const runId = args[0]?.trim() || latestRun(await rm.listRuns())
+      if (!runId) return { ok: false, text: `/titan report — no run id given and no runs exist.` }
+      const run = await rm.getRun(runId)
+      if (!run) return { ok: false, text: `/titan report — run not found: ${runId}` }
+      const tasks = await rm.getTasks(runId)
+      const approvals = await rm.listApprovals(runId)
+      const succeeded = tasks.filter((t) => t.status === "SUCCEEDED").length
+      const failed = tasks.filter((t) => t.status === "FAILED").length
+      const skipped = tasks.filter((t) => t.status === "SKIPPED").length
+      const evidence = tasks.reduce((a, t) => a + t.evidence.length, 0)
+      const active = await orch.activeWorkers(runId)
+      const lines = [
+        `# TITAN Delivery Report`,
+        ``,
+        `- **Run**: ${run.id}`,
+        `- **Goal**: ${run.goal}`,
+        `- **Status**: ${run.status}${run.statusReason ? ` (${run.statusReason})` : ""}`,
+        `- **Mode**: ${run.mode}`,
+        `- **Created**: ${new Date(run.createdAt).toISOString()}`,
+        run.closedAt ? `- **Closed**: ${new Date(run.closedAt).toISOString()}` : `- **Closed**: (not yet)`,
+        `- **Workers active**: ${active}`,
+        ``,
+        `## Tasks (${tasks.length})`,
+        ``,
+        `| # | ID | Title | Type | Status | Role | Evidence |`,
+        `|---|---|---|---|---|---|---|`,
+        ...tasks.map((t, i) => `| ${i + 1} | ${t.id} | ${t.title} | ${t.type} | ${t.status} | ${t.assignedRole ?? "-"} | ${t.evidence.length} |`),
+        ``,
+        `## Summary`,
+        ``,
+        `- Succeeded: ${succeeded}  Failed: ${failed}  Skipped: ${skipped}  Total: ${tasks.length}`,
+        `- Evidence entries: ${evidence}`,
+        `- Approvals: ${approvals.length} (${approvals.filter((a) => a.status === "approved").length} approved, ${approvals.filter((a) => a.status === "rejected").length} rejected, ${approvals.filter((a) => a.status === "pending").length} pending)`,
+        `- Budget: ${run.budget.maxConcurrentWorkers} workers, ${run.budget.maxAttemptsPerTask} attempts/task, ${run.budget.maxTotalSeconds}s wall clock`,
+        ``,
+        `## Verdict`,
+        ``,
+        failed === 0 && succeeded === tasks.length && tasks.length > 0
+          ? `All ${tasks.length} tasks succeeded. Delivery complete.`
+          : failed > 0
+            ? `${failed} task(s) failed — review the failures above before delivery.`
+            : `${succeeded}/${tasks.length} tasks succeeded; run not yet complete.`,
+      ]
+      return { ok: true, text: lines.join("\\n") }
+    },
   }
 }
 

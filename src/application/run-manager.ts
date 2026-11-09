@@ -266,6 +266,11 @@ export class RunManager {
     return recs.map(recordToRun)
   }
 
+  /** Approvals recorded for a run (R4, FR-102). */
+  async listApprovals(runId: string): Promise<import("../reliability/adapter.js").ApprovalRecord[]> {
+    return this.db.listApprovalsByRun(runId)
+  }
+
   async getTasks(runId: string): Promise<Task[]> {
     const recs = await this.db.listTasksByRun(runId)
     return recs.map(recordToTask)
