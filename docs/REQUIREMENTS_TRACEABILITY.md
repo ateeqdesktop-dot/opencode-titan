@@ -74,7 +74,21 @@
 | FR-054 | Leases for worker concurrency | VERIFIED | `SqliteAdapter.acquireLease/releaseLease/expireLeases` | `test/unit/persistence.test.ts` |
 | NFR-024 | Approvals scoped to action+resource, expiring | VERIFIED | `SqliteAdapter` approvals, `Approval` type | `test/unit/persistence.test.ts` |
 
-## Non-functional requirements covered in R1
+## 7.4 Agent execution (R3 — verified)
+
+| ID | Requirement | Status | Implementation | Tests |
+|---|---|---|---|---|
+| FR-060 | Worktree isolation for isolated-write roles | VERIFIED (real run) | `index.ts` `worktreeForTask` → `ctx.worktree.create`; executor passes `location.directory` | Sandbox `RUN-be0bc8c9`: implement/test sessions ran in registered worktrees; artifact created there |
+| FR-061 | Merge isolated work back | NOT_STARTED | — | Explicit R4 item (ADR-007 limitations) |
+| FR-032 | Worker sessions created per task w/ model routing | VERIFIED (real run) | `src/execution/session-executor.ts` (create → prompt → wait → judge) | `test/unit/execution.test.ts` (pure parts); sandbox run 6/6 |
+| FR-003-inject | Role injection via `session.hook("context")` (ADR-003) | VERIFIED (real run) | executor hook w/ session scoping + dispose | `test/unit/execution.test.ts` payload; sandbox run used it live |
+| FR-100/101 | Least-privilege tools denied at session | VERIFIED (real run) | `deniedToolsForRole` → `permissions[{action,resource:"*",effect:"deny"}]` at create | `test/unit/execution.test.ts`; live create accepted the permission batch |
+| FR-043/44 | Routing reason, fallback on retryable failure | IMPLEMENTED | `ModelRouter` + executor fallback path | `test/unit/budget-router.test.ts`; live fallback not triggered (no provider failure) |
+| FR-TIMEOUT | Task timeout/abort interrupt worker, never hang | VERIFIED (unit) | `Promise.race(prompt/wait, timeout, abort)` → `session.interrupt` | `test/unit/orchestrator.test.ts` (abort race); real path exercised in loop |
+| FR-109 | Honest status output (`/titan status`) | VERIFIED (real run) | `renderRunStatus` + `/titan status` dispatch | `test/unit/execution.test.ts`; live: RUNNING→CLOSED transitions displayed |
+| FR-110 | plan/run/status/tasks/agents/pause/resume/cancel commands | VERIFIED (parser+dispatch; live for plan/run/status/tasks) | `index.ts` `makeHandlers` R3 set | `test/unit/commands.test.ts`; live plan→run→status done |
+
+## Non-functional requirements covered in R3
 
 | ID | Requirement | Status | Evidence |
 |---|---|---|---|
@@ -84,6 +98,13 @@
 | NFR-006 | Local ops independent of model response time; TUI not blocked | VERIFIED | `display()` commits at ~40ms; interrupt suppresses model turn; no blocking await of model calls in setup |
 | NFR-010 | No loss of committed state transitions | VERIFIED | SQLite transactions (BEGIN/COMMIT/ROLLBACK); purge cascades |
 | NFR-024 | Approvals action+resource scoped, expiring | VERIFIED | `Approval` type + adapter |
+
+## Non-functional requirements covered in R3
+
+| ID | Requirement | Status | Evidence |
+|---|---|---|---|
+| NFR-009 | Worker sessions isolated per task, no cross-login | VERIFIED | One session per task execution; create params recorded (tiling in journal) |
+| NFR-011 | Restart recovery from durable state | VERIFIED (unit) | `test/unit/durable-db.test.ts`: close/reopen → same run + journal; recovery pass runs |
 
 ## Acceptance criteria (AC) — R1-relevant
 

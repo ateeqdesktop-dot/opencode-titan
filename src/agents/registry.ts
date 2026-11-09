@@ -227,8 +227,14 @@ export class AgentRegistry {
   }
 
   /**
-   * Pick the best role for a task type. Preference order: explicitly requested role,
-   * then lowest-risk suitable role (least privilege), then first registered.
+   * Pick the best role for a task type. Preference order: explicitly requested
+   * role → any specialist (non-orchestrator) suitable role, lowest risk first →
+   * orchestrator → first registered.
+   *
+   * Rationale (SRS §5.3): the orchestrator role owns coordination; assigning it
+   * to ordinary specialist tasks starves specialists and gives read-only or
+   * write-heavy work to the wrong tool policy. Specialists win whenever one is
+   * registered for the type.
    */
   selectFor(type: TaskType, preferredRoleId?: string): AgentRole {
     if (preferredRoleId) {
@@ -241,7 +247,9 @@ export class AgentRegistry {
     const candidates = this.forTaskType(type)
     if (candidates.length === 0) throw new Error(`No role registered for task type ${type}`)
     const riskOrder = { low: 0, medium: 1, high: 2 } as const
-    return [...candidates].sort((a, b) => riskOrder[a.riskLevel] - riskOrder[b.riskLevel])[0]!
+    const specialists = candidates.filter((r) => r.id !== "orchestrator")
+    const pool = specialists.length > 0 ? specialists : candidates
+    return [...pool].sort((a, b) => riskOrder[a.riskLevel] - riskOrder[b.riskLevel])[0]!
   }
 
   /**

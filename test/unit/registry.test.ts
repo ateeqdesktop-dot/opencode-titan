@@ -39,6 +39,16 @@ describe("Agent Registry (FR-030)", () => {
     expect(chosen.suitableTaskTypes).toContain("review")
   })
 
+  test("selectFor prefers specialists over the orchestrator role (SRS §5.3)", () => {
+    const reg = new AgentRegistry()
+    expect(reg.selectFor("planning").id).toBe("architect")
+    expect(reg.selectFor("integration").id).toBe("integrator")
+    expect(reg.selectFor("exploration").id).toBe("explorer")
+    // Orchestrator is the only role left if all specialists are removed.
+    reg.remove("architect")
+    expect(reg.selectFor("planning").id).toBe("orchestrator")
+  })
+
   test("selectFor honors an explicit preferred role", () => {
     const reg = new AgentRegistry()
     const chosen = reg.selectFor("implementation", "implementer")
