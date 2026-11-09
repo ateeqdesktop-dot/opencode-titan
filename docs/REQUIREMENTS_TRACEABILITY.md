@@ -114,13 +114,12 @@
 | AC-02 | `/titan doctor` reports compatibility | VERIFIED | Transcript: "TITAN doctor — PASS" (7/7) |
 | AC-03 | Commands dispatch and produce output | VERIFIED | 5 synthetic messages visible, 0 inbox backlog, 0 model tokens |
 
-## Not yet started (honest status)
+## Final status (R6 — honest)
 
-- R3: Run/Task manager, orchestrator, session management, worktrees, concurrency, handoffs, message bus (FR-050..074)
-- R4: Verification engine, repair loop, approvals workflow, security (FR-080..089, FR-100..110) — **unit-verified in this phase** (see §7.5); real-session contract verification deferred to R5
-- R5: TUI panel, RPC (FR-004, FR-005), delivery report (FR-108)
-- R6: full test matrix, security audit, perf, final traceability
-- Many FR/NFR/SEC/PERF IDs remain NOT_STARTED — listed as such, never claimed complete.
+- R0..R4: VERIFIED (R3/R4 have real-sandbox evidence for execution; R4 approvals unit-verified).
+- R5: server-side command surfaces VERIFIED live (review/verify/report/--supervised); TUI panel (FR-004/005) and RPC NOT implemented (no headless verification path); model-assisted deep review NOT implemented.
+- R6: full test matrix run (162 tests / 0 fail), tsc clean, security redaction + least-privilege + recovery verified, traceability updated, readiness verdict written (docs/READINESS.md).
+- FR/NFR/SEC/PERF IDs not explicitly listed above remain NOT_STARTED and are never claimed complete.
 
 
 ## 7.5 Verification & approval (R4 — verified, unit-level)
