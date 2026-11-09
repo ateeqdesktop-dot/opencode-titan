@@ -16,12 +16,12 @@
  */
 import { RunManager } from "../application/run-manager.js"
 import { type PersistenceAdapter } from "../reliability/adapter.js"
-import { BudgetManager } from "../platform/budget.js"
+import { BudgetManager, BudgetExceededError } from "../platform/budget.js"
 import { ModelRouter, type RouteDecision } from "../agents/router.js"
 import { AgentRegistry } from "../agents/registry.js"
 import { Dag } from "./dag.js"
 import { transitionRun, transitionTask } from "../domain/state.js"
-import { type Run, type Task, type TaskState, type RunFullState } from "../domain/types.js"
+import { type Run, type Task, type TaskState, type RunFullState, type ErrorClass } from "../domain/types.js"
 import { isRetryable } from "../domain/types.js"
 
 // ── Executor abstraction (real impl binds OpenCode sessions) ──────────────────
@@ -37,7 +37,7 @@ export interface TaskExecutionContext {
 export interface TaskExecutionResult {
   readonly ok: boolean
   readonly evidence: { kind: "diff" | "test" | "log" | "artifact" | "command"; ref: string; summary: string; ok?: boolean }[]
-  readonly errorClass?: string
+  readonly errorClass?: ErrorClass
   readonly errorMessage?: string
   readonly costUsd?: number
   readonly modelCalls?: number
@@ -69,6 +69,8 @@ export class Orchestrator {
   private readonly deps: OrchestratorDeps
   private readonly now: () => number
   private abortControllers = new Map<string, AbortController>()
+  /** taskId → runId index so cancel(runId) aborts only that run's workers. */
+  private taskRunIndex = new Map<string, string>()
   private paused = new Set<string>()
   private cancelled = new Set<string>()
 
@@ -82,6 +84,9 @@ export class Orchestrator {
     const rm = this.deps.runManager
     const run = await rm.getRun(runId)
     if (!run) throw new Error(`Run not found: ${runId}`)
+    // Refuse to double-drive: a second /titan run for an already-running run
+    // would spawn a second scheduling loop for the same persisted state.
+    if (run.status === "RUNNING") throw new Error(`Run ${runId} is already RUNNING — use /titan status ${runId}`)
 
     // Move CREATED/PREFLIGHT → RUNNING as needed.
     if (run.status === "CREATED") await rm.transitionRun(runId, "PREFLIGHT", "orchestrator start")
@@ -243,12 +248,27 @@ export class Orchestrator {
       await rm.transitionTask(taskId, "FAILED", "max attempts exceeded").catch(() => {})
       await rm.releaseTaskLease(taskId, owner).catch(() => {})
       this.abortControllers.delete(taskId)
+      this.taskRunIndex.delete(taskId)
       return
+    }
+
+    // Pre-launch budget gate: a run that has exhausted its budget must not spend
+    // further model calls. The task is left in its current (pre-execution) state;
+    // the scheduler loop stops and reports budget-exhausted (FR-047).
+    try {
+      budget.assertCanSpend(0, this.now())
+    } catch (e) {
+      if (e instanceof BudgetExceededError) {
+        await rm.releaseTaskLease(taskId, owner).catch(() => {})
+        return
+      }
+      throw e
     }
 
     // Execute.
     const ac = new AbortController()
     this.abortControllers.set(taskId, ac)
+    this.taskRunIndex.set(taskId, runId)
     let result: TaskExecutionResult
     try {
       budget.assertCanSpend(0, this.now())
@@ -263,12 +283,12 @@ export class Orchestrator {
         }),
         new Promise<TaskExecutionResult>((resolve) => {
           if (ac.signal.aborted) {
-            resolve({ ok: false, evidence: [], errorClass: "cancelled", errorMessage: "aborted" })
+            resolve({ ok: false, evidence: [], errorClass: "session", errorMessage: "aborted" })
             return
           }
           ac.signal.addEventListener(
             "abort",
-            () => resolve({ ok: false, evidence: [], errorClass: "cancelled", errorMessage: "aborted" }),
+            () => resolve({ ok: false, evidence: [], errorClass: "session", errorMessage: "aborted" }),
             { once: true },
           )
         }),
@@ -282,6 +302,7 @@ export class Orchestrator {
       }
     } finally {
       this.abortControllers.delete(taskId)
+      this.taskRunIndex.delete(taskId)
     }
 
     // Record budget usage.
@@ -310,11 +331,12 @@ export class Orchestrator {
       for (const sid of skipped) {
         await rm.transitionTask(sid, "SKIPPED", `upstream ${taskId} failed`).catch(() => {})
       }
-      const cls = (result.errorClass ?? "task-execution") as string
+      const cls: ErrorClass = result.errorClass ?? "task-execution"
       await rm.transitionTask(taskId, "FAILED", result.errorMessage).catch(() => {})
       // If retryable and attempts remain, route back through rework → QUEUED.
+      // Never after a user cancel: cancelled work must stay stopped (FR-106).
       const post = await rm.getTask(taskId)
-      if (post && isRetryable(cls as never) && post.attempts < post.limits.maxAttempts) {
+      if (!this.cancelled.has(runId) && post && isRetryable(cls) && post.attempts < post.limits.maxAttempts) {
         await rm.transitionTask(taskId, "NEEDS_REWORK", "retryable failure, re-queue").catch(() => {})
         await rm.transitionTask(taskId, "QUEUED").catch(() => {})
       }
@@ -341,11 +363,20 @@ export class Orchestrator {
 
   cancel(runId: string): void {
     this.cancelled.add(runId)
-    // Abort any in-flight workers for this run's tasks (best-effort; tasks tracked separately).
-    for (const [tid, ac] of this.abortControllers) {
-      // We don't have run→task index here; abort all is acceptable for cancel-all semantics.
-      ac.abort()
+    // Abort only the in-flight workers belonging to this run (taskRunIndex).
+    for (const [tid, rid] of this.taskRunIndex) {
+      if (rid !== runId) continue
+      const ac = this.abortControllers.get(tid)
+      if (ac) ac.abort()
     }
+  }
+
+  /** Number of tasks currently executing (RUNNING/VERIFYING/WAITING_APPROVAL). */
+  async activeWorkers(runId: string): Promise<number> {
+    const tasks = await this.deps.runManager.getTasks(runId)
+    return tasks.filter(
+      (t) => t.status === "RUNNING" || t.status === "VERIFYING" || t.status === "WAITING_APPROVAL",
+    ).length
   }
 
   private async waitWhilePaused(runId: string): Promise<void> {

@@ -420,11 +420,13 @@ export class RunManager {
       const ns =
         t.status === "SUCCEEDED"
           ? "succeeded"
-          : t.status === "FAILED" || t.status === "CANCELLED" || t.status === "SKIPPED"
-            ? "failed"
-            : t.status === "RUNNING" || t.status === "VERIFYING" || t.status === "WAITING_APPROVAL"
-              ? "running"
-              : "pending"
+          : t.status === "SKIPPED"
+            ? "skipped"
+            : t.status === "FAILED" || t.status === "CANCELLED"
+              ? "failed"
+              : t.status === "RUNNING" || t.status === "VERIFYING" || t.status === "WAITING_APPROVAL"
+                ? "running"
+                : "pending"
       dag.setState(t.id, ns as "pending" | "ready" | "running" | "succeeded" | "failed" | "skipped")
     }
     return { run, tasks, dag: dag.progress() }

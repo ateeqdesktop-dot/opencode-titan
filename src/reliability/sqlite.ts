@@ -21,6 +21,8 @@ import {
   type RunRecord,
   type TaskRecord,
 } from "./adapter.js"
+import { mkdirSync } from "node:fs"
+import { dirname } from "node:path"
 
 // ── Minimal driver abstraction (so we don't import bun:sqlite under Node) ─────
 interface SqlDriver {
@@ -31,13 +33,15 @@ interface SqlDriver {
   transaction<T>(fn: () => T): T
 }
 
-async function loadSqlDriver(): Promise<SqlDriver | null> {
+async function loadSqlDriver(file: string): Promise<SqlDriver | null> {
+  // A real (non-memory) file needs its parent directory to exist.
+  if (file !== ":memory:") mkdirSync(dirname(file), { recursive: true })
   // Try bun:sqlite first (OpenCode server runtime).
   try {
     const mod = (await import(/* @vite-ignore */ "bun:sqlite")) as {
       Database: new (path: string, opts?: unknown) => unknown
     }
-    const db = new mod.Database(":memory:")
+    const db = new mod.Database(file)
     return wrapSync(db as never, "bun")
   } catch {
     /* not bun */
@@ -47,7 +51,7 @@ async function loadSqlDriver(): Promise<SqlDriver | null> {
     const mod = (await import(/* @vite-ignore */ "node:sqlite")) as {
       DatabaseSync: new (path: string, opts?: unknown) => unknown
     }
-    const db = new mod.DatabaseSync(":memory:")
+    const db = new mod.DatabaseSync(file)
     return wrapSync(db as never, "node")
   } catch {
     /* not node */
@@ -220,9 +224,15 @@ export class SqliteAdapter implements PersistenceAdapter {
     this.driver = kind === "bun" ? "bun-sqlite" : kind === "node" ? "node-sqlite" : "json-fallback"
   }
 
-  /** Open the adapter, selecting the best available driver. */
-  static async open(): Promise<SqliteAdapter> {
-    const drv = await loadSqlDriver()
+  /**
+   * Open the adapter, selecting the best available driver.
+   * - `file: ":memory:"` (default when omitted) → ephemeral, used by unit tests.
+   * - `file: "<path>"` → durable, survives restarts (SRS FR-090; required for
+   *   recovery after OpenCode restarts). The parent directory is created.
+   */
+  static async open(opts?: { readonly file?: string | null }): Promise<SqliteAdapter> {
+    const file = opts?.file ?? ":memory:"
+    const drv = await loadSqlDriver(file)
     if (!drv) return new SqliteAdapter("none", null)
     const kind = drv === null ? "none" : ((drv as unknown as { __k?: string }).__k ?? "bun")
     const adapter = new SqliteAdapter(kind === "node" ? "node" : "bun", drv)
