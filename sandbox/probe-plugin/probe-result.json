@@ -1,0 +1,70 @@
+{
+  "at": 1794160623499,
+  "findings": [
+    {
+      "surface": "plugin.define",
+      "ok": true,
+      "detail": "loaded id=titan-probe app=2.2.5"
+    },
+    {
+      "surface": "location",
+      "ok": true,
+      "detail": "directory=/home/ateeq/opencodeagent/sandbox"
+    },
+    {
+      "surface": "storage",
+      "ok": true,
+      "detail": "set/get round-trip"
+    },
+    {
+      "surface": "session.create/get",
+      "ok": true,
+      "detail": "sessionID=ses_e43b180b4ffe0lnBv4vukvSrSk"
+    },
+    {
+      "surface": "session.remove",
+      "ok": true,
+      "detail": "removed"
+    },
+    {
+      "surface": "tool.transform/add/list",
+      "ok": true,
+      "detail": "registered=true"
+    },
+    {
+      "surface": "command.transform/add/list",
+      "ok": true,
+      "detail": "registered=true shape=data[]"
+    },
+    {
+      "surface": "event.subscribe",
+      "ok": true,
+      "detail": "delivered event type=session.created (live-only, listen-then-trigger)"
+    },
+    {
+      "surface": "worktree.list",
+      "ok": true,
+      "detail": "projectID=global"
+    },
+    {
+      "surface": "model.list",
+      "ok": true,
+      "detail": "count=142 sample=opencode/iceman-free shape=data[]"
+    },
+    {
+      "surface": "vcs.get/status",
+      "ok": true,
+      "detail": "branch=none changedFiles=5 shape=get.data.branch / status.data[]"
+    },
+    {
+      "surface": "permission.assert",
+      "ok": true,
+      "detail": "assert is a function"
+    },
+    {
+      "surface": "session.hook(context)",
+      "ok": true,
+      "detail": "register + dispose ok"
+    }
+  ]
+}

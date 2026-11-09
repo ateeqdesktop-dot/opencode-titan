@@ -1,0 +1,25 @@
+{
+  "name": "opencode-titan",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "TITAN — Advanced Multi-Agent Engineering Orchestration System for OpenCode V2",
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "src"
+  ],
+  "dependencies": {
+    "@opencode/plugin": "2.2.6"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.9.2"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test"
+  }
+}

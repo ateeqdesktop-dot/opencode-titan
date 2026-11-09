@@ -1,0 +1,10 @@
+{
+  "at": 1794160628417,
+  "findings": [
+    {
+      "surface": "session.prompt/wait",
+      "ok": true,
+      "detail": "model=opencode/iceman-free got_DONE=true"
+    }
+  ]
+}
