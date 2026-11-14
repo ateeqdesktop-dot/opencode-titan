@@ -81,7 +81,7 @@ export function taskPromptText(task: Task, goal: string): string {
 /** Classify an unexpected error for the retry engine (SRS §12.1). */
 export function classifySessionError(e: unknown): ErrorClass {
   const msg = String(e).toLowerCase()
-  if (msg.includes("rate") || msg.includes("429") || msg.includes("too many requests")) return "rate-limit"
+  if (msg.includes("rate") || msg.includes("429") || msg.includes("too many requests") || msg.includes("insufficient") || msg.includes("funds") || msg.includes("quota")) return "rate-limit"
   if (msg.includes("timeout") || msg.includes("timed out") || msg.includes("aborted")) return "session"
   if (msg.includes("network") || msg.includes("econn") || msg.includes("fetch failed")) return "network"
   if (msg.includes("permission") || msg.includes("403")) return "permission"
