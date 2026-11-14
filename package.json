@@ -3,15 +3,21 @@
   "version": "0.1.0",
   "type": "module",
   "description": "TITAN — Advanced Multi-Agent Engineering Orchestration System for OpenCode V2",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts",
-    "./tui": "./src/tui.ts",
-    "./rpc": "./src/rpc/contract.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./tui": {
+      "import": "./dist/tui.js",
+      "types": "./dist/tui.d.ts"
+    }
   },
   "files": [
-    "src",
-    "docs"
+    "dist",
+    "docs",
+    "README.md"
   ],
   "keywords": ["opencode", "plugin", "multi-agent", "orchestration", "ai"],
   "license": "MIT",
@@ -25,7 +31,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test test",
-    "build": "tsc --noEmit && echo 'Typecheck OK'"
+    "prepare": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json"
   },
   "engines": {
     "opencode": ">=2.0.0"
