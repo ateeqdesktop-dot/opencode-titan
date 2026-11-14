@@ -52,7 +52,7 @@ with a complete durable journal (8 run transitions, 30 task transitions).
 
 7. **Semantic truth of evidence** — gates check that evidence *exists*, not that it is *correct*. Correctness is a human review step.
 
-8. **TUI panel runtime (FR-004)** — VERIFIED via TUI launch: plugin loaded (logs confirm "plugin reconciliation"), "TITAN" rendered in TUI UI, `/titan help` accepted as input. No crashes observed. Full visual verification (toast, slash palette) requires human inspection but no errors detected.
+- **TUI panel runtime (FR-004)** — VERIFIED via TUI launch: plugin loaded (logs confirm "plugin reconciliation completed, plugins=15"), "TITAN" rendered in TUI UI, `/titan doctor` accepted as input, no crashes or errors. Toast/slash-palette visual confirmation requires human but no errors detected.
 
 ## Risk assessment for real use
 
