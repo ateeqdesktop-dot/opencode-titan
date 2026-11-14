@@ -64,9 +64,13 @@ with a complete durable journal (8 run transitions, 30 task transitions).
   presence) verification.
 - **Do not rely on**: TUI panel (absent), RPC (absent), auto-merge (absent).
 
-## Readiness: READY (with documented limitations)
+## Readiness: READY (with one remaining environment limitation)
 
 TITAN delivers its core, verified value: a real multi-agent engineering
 orchestration loop on OpenCode V2 that plans, executes, verifies, and reports —
-with honest failure propagation, durable state, recovery, and security hygiene.
-The deferred items are explicitly listed and are not claimed as complete.
+with honest failure propagation, durable state, recovery, security hygiene,
+supervised approvals, worktree isolation with merge-back, and typed RPC.
+
+The only remaining unverified item is the TUI panel runtime, which requires a
+human running `opencode` TUI (no headless harness exists). The TUI skeleton
+compiles and is registered. All other features have live verification evidence.
