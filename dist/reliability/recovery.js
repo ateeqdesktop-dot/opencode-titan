@@ -1,0 +1,65 @@
+const DEFAULT_STALE_LEASE_MS = 5 * 60 * 1000;
+export async function recover(adapter, runManager, opts = {}) {
+    const staleMs = opts.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS;
+    const reconcile = opts.reconcileAmbiguous ?? true;
+    const now = Date.now();
+    const report = {
+        runsScanned: 0,
+        runsResumed: 0,
+        tasksReconciled: 0,
+        tasksMarkedNeedsReconciliation: 0,
+        leasesExpired: 0,
+        integrityIssues: [],
+        errors: [],
+    };
+    // 1. Integrity check first.
+    const integrity = await adapter.verifyIntegrity();
+    if (!integrity.ok) {
+        report.integrityIssues.push(...integrity.issues);
+    }
+    // 2. Expire stale leases (dead workers).
+    report.leasesExpired = await adapter.expireLeases(now - staleMs);
+    // 3. Scan non-terminal runs.
+    const runs = await runManager.listRuns();
+    const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "REJECTED", "CLOSED"]);
+    const activeRuns = runs.filter((r) => !terminal.has(r.status));
+    report.runsScanned = activeRuns.length;
+    for (const run of activeRuns) {
+        try {
+            const tasks = await runManager.getTasks(run.id);
+            let touched = false;
+            for (const task of tasks) {
+                // A task marked RUNNING but with no (or expired) lease is ambiguous.
+                // WAITING_APPROVAL is deliberate parking (human gate) — even without a
+                // live lease it must NOT be reconciled to BLOCKED; the approval state
+                // machine owns its next move (R4, FR-102).
+                if (task.status === "RUNNING" || task.status === "VERIFYING") {
+                    const lease = await adapter.getLease(task.id);
+                    const leaseAlive = !!lease && lease.expiresAt > now;
+                    if (!leaseAlive) {
+                        if (reconcile) {
+                            // Mark as NEEDS_RECONCILIATION via the aux state on the Run, and the task as
+                            // NEEDS_REWORK so it can be re-run (never auto-succeed).
+                            await runManager.transitionTask(task.id, "BLOCKED", "recovery: no live lease, ambiguous state");
+                            report.tasksMarkedNeedsReconciliation++;
+                            touched = true;
+                        }
+                    }
+                    else {
+                        report.tasksReconciled++;
+                    }
+                }
+                // READY/QUEUED tasks whose deps are met are safe to resume.
+                if (task.status === "READY" || task.status === "QUEUED") {
+                    touched = true;
+                }
+            }
+            if (touched)
+                report.runsResumed++;
+        }
+        catch (e) {
+            report.errors.push(`run ${run.id}: ${String(e)}`);
+        }
+    }
+    return report;
+}
