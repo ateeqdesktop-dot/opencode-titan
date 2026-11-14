@@ -4,6 +4,8 @@
   "type": "module",
   "description": "TITAN — Advanced Multi-Agent Engineering Orchestration System for OpenCode V2",
   "main": "./dist/index.js",
+  "server": "./dist/index.js",
+  "tui": "./dist/tui.js",
   "exports": {
     ".": {
       "import": "./dist/index.js",
