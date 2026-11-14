@@ -31,7 +31,6 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test test",
-    "prepare": "tsc -p tsconfig.build.json",
     "build": "tsc -p tsconfig.build.json"
   },
   "engines": {
