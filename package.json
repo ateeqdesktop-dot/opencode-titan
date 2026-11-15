@@ -17,6 +17,11 @@
   "dependencies": {
     "@opencode/plugin": "2.2.6"
   },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test test",
+    "build": "tsc -p tsconfig.build.json"
+  },
   "files": [
     "dist",
     "docs",
